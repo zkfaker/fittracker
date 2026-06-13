@@ -6,7 +6,7 @@ package.name = fittracker
 package.domain = org.fittracker
 
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas,ttf,json,db
+source.include_exts = py,png,jpg,kv,atlas,ttf,otf,ttc,json,db
 
 version = 1.0.0
 

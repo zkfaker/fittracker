@@ -425,36 +425,70 @@ class FitTrackerApp(MDApp):
     def _register_cjk_fonts(self):
         import platform
         system = platform.system()
-        
+
         font_regular = None
         font_bold = None
-        
-        if system == "Windows":
+        font_medium = None
+
+        # 项目目录中的捆绑字体（最可靠，APK打包后直接可用）
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        bundled_regular = os.path.join(base_dir, "fonts", "NotoSansSC-Regular.otf")
+        bundled_bold = os.path.join(base_dir, "fonts", "NotoSansSC-Bold.otf")
+        bundled_medium = os.path.join(base_dir, "fonts", "NotoSansSC-Medium.otf")
+
+        # 1) 优先使用捆绑字体
+        if os.path.exists(bundled_regular):
+            font_regular = bundled_regular
+            print(f"[Font] Using bundled: {bundled_regular}")
+            if os.path.exists(bundled_bold):
+                font_bold = bundled_bold
+            if os.path.exists(bundled_medium):
+                font_medium = bundled_medium
+        elif system == "Windows":
             font_regular = "C:/Windows/Fonts/msyh.ttc"
             font_bold = "C:/Windows/Fonts/msyhbd.ttc"
             if not os.path.exists(font_regular):
                 font_regular = "C:/Windows/Fonts/simhei.ttf"
                 font_bold = font_regular
+                font_medium = font_regular
         elif system == "Linux":
-            # Android字体路径 - 尝试所有可能的路径
+            # Android字体路径 - 覆盖主流品牌
             android_fonts = [
+                bundled_regular,
                 "/system/fonts/NotoSansSC-Regular.otf",
                 "/system/fonts/NotoSansCJK-Regular.ttc",
-                "/system/fonts/DroidSansFallback.ttf",
                 "/system/fonts/NotoSansSC-Regular.ttf",
-                "/system/fonts/Roboto-Regular.ttf",  # Android默认字体
-                "/system/fonts/DroidSans.ttf",
+                "/system/fonts/DroidSansFallback.ttf",
+                # Xiaomi (小米)
+                "/system/fonts/MiSans-Regular.ttf",
+                "/system/fonts/MiSans.ttf",
+                # Huawei (华为)
+                "/system/fonts/HarmonyOS_Sans_SC_Regular.ttf",
+                "/system/fonts/HarmonyOS-Sans.ttf",
+                # OPPO / vivo
+                "/system/fonts/OPPOSans-Regular.ttf",
+                "/system/fonts/OnePlusSans-Regular.ttf",
+                # Samsung (三星)
+                "/system/fonts/NotoSansKR-Regular.otf",
+                "/system/fonts/SamsungOne-400.ttf",
+                # 通用后备
+                "/system/fonts/NotoSerifCJK-Regular.ttc",
+                "/system/fonts/CJK_CN.ttf",
             ]
             for f in android_fonts:
                 if os.path.exists(f):
                     font_regular = f
                     break
-            
-            # Bold字体
+
+            # Bold 字体搜索
             android_bold_fonts = [
+                bundled_bold,
                 "/system/fonts/NotoSansSC-Bold.otf",
                 "/system/fonts/NotoSansCJK-Bold.ttc",
+                "/system/fonts/NotoSansSC-Bold.ttf",
                 "/system/fonts/DroidSans-Bold.ttf",
+                "/system/fonts/MiSans-Bold.ttf",
+                "/system/fonts/HarmonyOS_Sans_SC_Bold.ttf",
             ]
             for f in android_bold_fonts:
                 if os.path.exists(f):
@@ -462,13 +496,38 @@ class FitTrackerApp(MDApp):
                     break
             if not font_bold:
                 font_bold = font_regular
-        
+
+            # Medium 字体搜索
+            android_medium_fonts = [
+                bundled_medium,
+                "/system/fonts/NotoSansSC-Medium.otf",
+                "/system/fonts/NotoSansSC-Medium.ttf",
+                "/system/fonts/MiSans-Medium.ttf",
+            ]
+            for f in android_medium_fonts:
+                if os.path.exists(f):
+                    font_medium = f
+                    break
+            if not font_medium:
+                font_medium = font_regular
+
         if font_regular and os.path.exists(font_regular):
-            print(f"Registering font: {font_regular}")
-            for name in ["Roboto", "RobotoLight", "RobotoMedium", "Default"]:
-                LabelBase.register(name=name, fn_regular=font_regular, fn_bold=font_bold or font_regular)
+            print(f"[Font] Registering: {font_regular}")
+            # 注册所有KivyMD使用的字体名称
+            for name in ["Roboto", "RobotoLight", "RobotoThin", "Default"]:
+                LabelBase.register(
+                    name=name,
+                    fn_regular=font_regular,
+                    fn_bold=font_bold or font_regular,
+                )
+            # RobotoMedium 使用 Medium 变体（更精准的字重）
+            LabelBase.register(
+                name="RobotoMedium",
+                fn_regular=font_medium or font_regular,
+                fn_bold=font_bold or font_regular,
+            )
         else:
-            print("Warning: No CJK font found, Chinese may not display correctly")
+            print("[Font] WARNING: No CJK font found, Chinese may display as boxes")
 
 
     def on_start(self):
