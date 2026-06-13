@@ -1186,11 +1186,119 @@ class FitTrackerApp(MDApp):
                 container.add_widget(swipe_card)
 
     def _take_photo(self):
-        """选择图片进行识别"""
+        """拍照识别食物 - 直接打开系统相机"""
+        if self._is_android():
+            self._request_camera()
+        else:
+            # 桌面环境用文件选择器调试
+            self._open_file_chooser()
+
+    def _is_android(self):
+        """判断是否运行在 Android 环境"""
+        try:
+            import android  # noqa: F401
+            return True
+        except ImportError:
+            try:
+                import jnius  # noqa: F401
+                # 如果有 jnius 且系统是 Linux，也可能是 Android
+                import platform
+                return platform.system() == "Linux"
+            except ImportError:
+                return False
+
+    def _request_camera(self):
+        """请求相机权限（Android 6+ 需要运行时权限）"""
+        try:
+            from android.permissions import request_permissions, \
+                Permission, check_permission
+            if check_permission(Permission.CAMERA):
+                self._start_camera()
+            else:
+                def on_permissions(permissions, results):
+                    if results and all(results):
+                        self._start_camera()
+                    else:
+                        self._show_error_popup("需要「相机」权限才能拍照识别食物\n请在系统设置中开启相机权限")
+                request_permissions([Permission.CAMERA], on_permissions)
+        except ImportError:
+            # 非 Android 或有异常时直接尝试
+            self._start_camera()
+
+    def _start_camera(self):
+        """打开系统相机拍照"""
+        import datetime
+        from plyer import camera
+
+        # 照片保存目录（公共 Pictures 目录，相机 APP 需要有写入权限）
+        photo_dir = "/storage/emulated/0/Pictures/FitTracker"
+        try:
+            os.makedirs(photo_dir, exist_ok=True)
+        except Exception:
+            # 降级到应用私有目录
+            photo_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "photos"
+            )
+            os.makedirs(photo_dir, exist_ok=True)
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.join(photo_dir, f"food_{timestamp}.jpg")
+
+        try:
+            print(f"[Camera] Opening camera, save to: {filename}")
+            self._camera_file = filename  # 防止 GC
+            camera.take_picture(filename, self._on_camera_complete)
+        except Exception as e:
+            print(f"[Camera] Failed to open camera: {e}")
+            self._show_error_popup("无法打开相机，请确保已授予相机权限")
+
+    def _on_camera_complete(self, image_path):
+        """相机拍照结束回调"""
+        from kivy.clock import Clock
+        print(f"[Camera] Callback with: {image_path}")
+        if image_path and os.path.exists(str(image_path)):
+            Clock.schedule_once(
+                lambda dt: self._show_recognition_result(str(image_path)), 0
+            )
+        else:
+            Clock.schedule_once(
+                lambda dt: self._show_error_popup("拍照取消或失败，请重试"), 0
+            )
+
+    def _show_error_popup(self, message):
+        """通用错误提示弹窗"""
+        from kivy.uix.popup import Popup
+        content = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=[dp(20), dp(12), dp(20), dp(12)],
+        )
+        content.add_widget(MDLabel(
+            text=message,
+            font_style="Subtitle1",
+            size_hint_y=None,
+            height=dp(40),
+        ))
+        btn_layout = BoxLayout(size_hint_y=None, height=dp(44))
+        ok_btn = MDFlatButton(text="确定", size_hint_x=0.5)
+        btn_layout.add_widget(ok_btn)
+        content.add_widget(btn_layout)
+        popup = Popup(
+            title="提示",
+            content=content,
+            size_hint=(0.8, None),
+            height=dp(160),
+            auto_dismiss=False,
+        )
+        ok_btn.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+
+    def _open_file_chooser(self):
+        """（桌面调试用）从文件选择图片"""
         from kivy.uix.filechooser import FileChooserIconView
         from kivy.uix.popup import Popup
         import platform
-        
+
         system = platform.system()
         if system == "Windows":
             initial_path = "C:/Users"
@@ -1198,35 +1306,35 @@ class FitTrackerApp(MDApp):
             initial_path = "/storage/emulated/0"
             if os.path.exists("/storage/emulated/0/DCIM"):
                 initial_path = "/storage/emulated/0/DCIM"
-        
+
         content = BoxLayout(orientation='vertical')
-        
+
         filechooser = FileChooserIconView(
             path=initial_path,
             filters=['*.png', '*.jpg', '*.jpeg'],
             size_hint_y=0.85,
         )
         content.add_widget(filechooser)
-        
+
         btn_layout = BoxLayout(size_hint_y=0.15, spacing=dp(10), padding=dp(10))
         cancel_btn = MDFlatButton(text='取消', size_hint_x=0.5)
-        select_btn = MDFlatButton(text='识别', size_hint_x=0.5, 
+        select_btn = MDFlatButton(text='识别', size_hint_x=0.5,
                                   md_bg_color=self._rgba("#4CAF50"),
                                   theme_text_color="Custom",
                                   text_color=(1, 1, 1, 1))
         btn_layout.add_widget(cancel_btn)
         btn_layout.add_widget(select_btn)
         content.add_widget(btn_layout)
-        
-        popup = Popup(title='选择食物图片', content=content, 
+
+        popup = Popup(title='选择食物图片', content=content,
                       size_hint=(0.95, 0.9), auto_dismiss=False)
-        
+
         def select_image(*args):
             if filechooser.selection:
                 image_path = filechooser.selection[0]
                 popup.dismiss()
                 self._show_recognition_result(image_path)
-        
+
         cancel_btn.bind(on_release=lambda *_: popup.dismiss())
         select_btn.bind(on_release=select_image)
         popup.open()
