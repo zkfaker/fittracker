@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     
     steps:
     - uses: actions/checkout@v4
@@ -24,8 +24,9 @@ jobs:
           libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
           libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev \
           zlib1g-dev libgstreamer1.0-0 gstreamer1.0-plugins-base \
-          pkg-config autoconf automake libtool libltdl-dev unzip zip
-        pip install buildozer cython
+          pkg-config autoconf automake libtool libltdl-dev unzip zip \
+          openjdk-17-jdk wget
+        pip install buildozer cython==0.29.36
     
     - name: Build APK
       run: |
@@ -33,6 +34,7 @@ jobs:
     
     - name: Upload APK
       uses: actions/upload-artifact@v4
+      if: success()
       with:
         name: fittracker-apk
         path: bin/*.apk

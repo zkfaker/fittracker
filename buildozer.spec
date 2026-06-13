@@ -16,7 +16,7 @@ requirements = python3,kivy==2.3.1,kivymd==1.2.0,plyer,sqlite3
 # Android
 android.api = 34
 android.minapi = 21
-android.ndk = 25b
+android.ndk = 26b
 android.ndk_path =
 android.sdk_path =
 android.ant_path =
@@ -35,6 +35,9 @@ orientation = portrait
 
 # Fullscreen
 fullscreen = 0
+
+# P4A recipe config
+p4a.branch = develop
 
 [buildozer]
 
