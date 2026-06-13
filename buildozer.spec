@@ -36,9 +36,6 @@ orientation = portrait
 # Fullscreen
 fullscreen = 0
 
-# P4A recipe config
-p4a.branch = develop
-
 [buildozer]
 
 log_level = 2

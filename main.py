@@ -22,8 +22,6 @@ from kivy.graphics import Color, RoundedRectangle, Rectangle, Line
 from kivy.uix.widget import Widget
 from kivy.uix.gridlayout import GridLayout
 
-from plyer import camera as plyer_camera
-
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.card import MDCard
@@ -1122,41 +1120,40 @@ class FitTrackerApp(MDApp):
                 container.add_widget(swipe_card)
 
     def _take_photo(self):
-        import platform
-        system = platform.system()
-        
-        if system == "Linux":
-            # Android - 使用Kivy内置的文件选择器让用户选择图片
-            self._pick_image_android()
-        else:
-            # Windows - 尝试使用plyer
-            self._take_photo_plyer()
-
-    def _pick_image_android(self):
-        """Android上使用文件选择器选择图片"""
+        """选择图片进行识别"""
         from kivy.uix.filechooser import FileChooserIconView
         from kivy.uix.popup import Popup
+        import platform
+        
+        system = platform.system()
+        if system == "Windows":
+            initial_path = "C:/Users"
+        else:
+            initial_path = "/storage/emulated/0"
+            if os.path.exists("/storage/emulated/0/DCIM"):
+                initial_path = "/storage/emulated/0/DCIM"
         
         content = BoxLayout(orientation='vertical')
         
         filechooser = FileChooserIconView(
-            path='/storage/emulated/0/DCIM',
+            path=initial_path,
             filters=['*.png', '*.jpg', '*.jpeg'],
-            size_hint_y=0.8,
+            size_hint_y=0.85,
         )
         content.add_widget(filechooser)
         
-        btn_layout = BoxLayout(size_hint_y=0.2, spacing=dp(10), padding=dp(10))
+        btn_layout = BoxLayout(size_hint_y=0.15, spacing=dp(10), padding=dp(10))
         cancel_btn = MDFlatButton(text='取消', size_hint_x=0.5)
-        select_btn = MDFlatButton(text='选择', size_hint_x=0.5, 
+        select_btn = MDFlatButton(text='识别', size_hint_x=0.5, 
+                                  md_bg_color=self._rgba("#4CAF50"),
                                   theme_text_color="Custom",
-                                  text_color=self._rgba("#4CAF50"))
+                                  text_color=(1, 1, 1, 1))
         btn_layout.add_widget(cancel_btn)
         btn_layout.add_widget(select_btn)
         content.add_widget(btn_layout)
         
         popup = Popup(title='选择食物图片', content=content, 
-                      size_hint=(0.9, 0.9), auto_dismiss=False)
+                      size_hint=(0.95, 0.9), auto_dismiss=False)
         
         def select_image(*args):
             if filechooser.selection:
@@ -1167,31 +1164,6 @@ class FitTrackerApp(MDApp):
         cancel_btn.bind(on_release=lambda *_: popup.dismiss())
         select_btn.bind(on_release=select_image)
         popup.open()
-
-    def _take_photo_plyer(self):
-        """Windows上使用plyer拍照"""
-        import tempfile
-        import os
-
-        def on_success(filepath):
-            self._show_recognition_result(filepath)
-
-        def on_error(e):
-            print(f"Camera error: {e}")
-            self.show_add_food_dialog()
-
-        try:
-            temp_dir = tempfile.gettempdir()
-            photo_path = os.path.join(temp_dir, "fittracker_photo.jpg")
-
-            from plyer import camera
-            camera.take_picture(
-                filename=photo_path,
-                on_complete=on_success,
-            )
-        except Exception as e:
-            print(f"Camera not available: {e}")
-            self.show_add_food_dialog()
 
     def _show_recognition_result(self, image_path):
         import threading
