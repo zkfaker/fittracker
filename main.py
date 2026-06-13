@@ -334,8 +334,8 @@ class CalendarWidget(BoxLayout):
         # Days grid
         days_in_month = self._get_days_in_month()
         first_day = self._get_first_day_of_month()
-        if first_day == 0:
-            first_day = 7
+        # first_day: Python weekday() 周一=0 ... 周日=6
+        # 日历从周一开始排列, 所以偏移量 = first_day, 无需转换
 
         days_grid = GridLayout(
             cols=7,
@@ -346,7 +346,7 @@ class CalendarWidget(BoxLayout):
         )
 
         # Empty cells before first day
-        for _ in range(first_day - 1):
+        for _ in range(first_day):
             days_grid.add_widget(Widget())
 
         # Day cells
@@ -414,12 +414,15 @@ class FitTrackerApp(MDApp):
         super().__init__(**kwargs)
         database.init_db()
         self.selected_date = datetime.date.today().isoformat()
+        self._nav_history = []  # 页面导航历史
 
     def build(self):
         self._register_cjk_fonts()
         self.theme_cls.primary_palette = "Green"
         self.theme_cls.primary_hue = "500"
         self.theme_cls.theme_style = "Light"
+        # 拦截 Android 返回键
+        Window.bind(on_keyboard=self._on_keyboard)
         return Builder.load_string(KV)
 
     def _register_cjk_fonts(self):
@@ -432,9 +435,9 @@ class FitTrackerApp(MDApp):
 
         # 项目目录中的捆绑字体（最可靠，APK打包后直接可用）
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        bundled_regular = os.path.join(base_dir, "fonts", "NotoSansSC-Regular.otf")
-        bundled_bold = os.path.join(base_dir, "fonts", "NotoSansSC-Bold.otf")
-        bundled_medium = os.path.join(base_dir, "fonts", "NotoSansSC-Medium.otf")
+        bundled_regular = os.path.join(base_dir, "fonts", "NotoSansSC-Regular.ttf")
+        bundled_bold = os.path.join(base_dir, "fonts", "NotoSansSC-Bold.ttf")
+        bundled_medium = os.path.join(base_dir, "fonts", "NotoSansSC-Regular.ttf")  # 无Medium, 复用Regular
 
         # 1) 优先使用捆绑字体
         if os.path.exists(bundled_regular):
@@ -922,34 +925,60 @@ class FitTrackerApp(MDApp):
         h = hex_color.lstrip("#")
         return tuple(int(h[i:i+2], 16) / 255 for i in (0, 2, 4)) + (1,)
 
+    # ── Android 返回键 ─────────────────────────────────────────
+    def _on_keyboard(self, window, key, scancode, codepoint, modifier):
+        """拦截返回键：有导航历史时返回上一页，否则退出应用"""
+        if key == 27:  # Escape / Android Back
+            if self._nav_history:
+                prev_screen = self._nav_history.pop()
+                self.root.current = prev_screen
+                # 刷新目标页面
+                refresh_map = {
+                    "home": self.refresh_home,
+                    "food": self.refresh_food,
+                    "exercise": self.refresh_exercise,
+                    "plan": self.refresh_plan,
+                    "calendar": self.refresh_calendar,
+                    "settings": self.refresh_settings,
+                }
+                if prev_screen in refresh_map:
+                    refresh_map[prev_screen]()
+                self._update_nav_color(prev_screen)
+                return True  # 已拦截，不退出
+            # 无历史记录：让系统处理（默认退出应用）
+            return False
+        return False
+
+    # ── 页面导航（自动记录历史）─────────────────────────────────
+    def _navigate(self, screen_name, refresh_fn):
+        """统一导航方法：记录历史并跳转"""
+        current = self.root.current
+        if current != screen_name:
+            self._nav_history.append(current)
+        self.root.current = screen_name
+        refresh_fn()
+        self._update_nav_color(screen_name)
+
     def go_home(self):
+        self._nav_history.clear()  # 回到首页清空历史
         self.root.current = "home"
         self.refresh_home()
         self._update_nav_color("home")
 
     def go_to_food(self):
-        self.root.current = "food"
-        self.refresh_food()
-        self._update_nav_color("food")
+        self._navigate("food", self.refresh_food)
 
     def go_to_exercise(self):
-        self.root.current = "exercise"
-        self.refresh_exercise()
-        self._update_nav_color("exercise")
+        self._navigate("exercise", self.refresh_exercise)
 
     def go_to_plan(self):
-        self.root.current = "plan"
-        self.refresh_plan()
-        self._update_nav_color("plan")
+        self._navigate("plan", self.refresh_plan)
 
     def go_to_calendar(self):
-        self.root.current = "calendar"
-        self.refresh_calendar()
-        self._update_nav_color("calendar")
+        self._navigate("calendar", self.refresh_calendar)
 
     def go_to_settings(self):
-        self.root.current = "settings"
-        self.refresh_settings()
+        self._navigate("settings", self.refresh_settings)
 
     def _update_nav_color(self, active):
         pass
