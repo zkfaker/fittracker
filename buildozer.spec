@@ -25,7 +25,7 @@ android.gradle_api_version = 8
 android.archs = arm64-v8a
 
 # Permissions
-android.permissions = CAMERA, INTERNET, ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION, ACTIVITY_RECOGNITION
+android.permissions = CAMERA, INTERNET, ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION, ACTIVITY_RECOGNITION, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE
 
 # App icon (optional)
 # icon = icon.png

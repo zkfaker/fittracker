@@ -425,23 +425,46 @@ class FitTrackerApp(MDApp):
         return Builder.load_string(KV)
 
     def _register_cjk_fonts(self):
-        # Windows fonts
-        font_regular = "C:/Windows/Fonts/msyh.ttc"
-        font_bold = "C:/Windows/Fonts/msyhbd.ttc"
-
-        if not os.path.exists(font_regular):
-            font_regular = "C:/Windows/Fonts/simhei.ttf"
-            font_bold = font_regular
-
-        if not os.path.exists(font_regular):
-            return
-
-        # Register for all Kivy font slots
-        for name in ["Roboto", "RobotoLight", "RobotoMedium", "Default"]:
-            LabelBase.register(name=name, fn_regular=font_regular, fn_bold=font_bold)
-
-        # Force Window to use default font
-        Window.font_name = "Roboto"
+        import platform
+        system = platform.system()
+        
+        font_regular = None
+        font_bold = None
+        
+        if system == "Windows":
+            font_regular = "C:/Windows/Fonts/msyh.ttc"
+            font_bold = "C:/Windows/Fonts/msyhbd.ttc"
+            if not os.path.exists(font_regular):
+                font_regular = "C:/Windows/Fonts/simhei.ttf"
+                font_bold = font_regular
+        elif system == "Linux":
+            # Android字体路径
+            android_fonts = [
+                "/system/fonts/NotoSansSC-Regular.otf",
+                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/DroidSansFallback.ttf",
+                "/system/fonts/NotoSansSC-Bold.otf",
+            ]
+            for f in android_fonts:
+                if os.path.exists(f):
+                    font_regular = f
+                    break
+            # Bold字体
+            android_bold_fonts = [
+                "/system/fonts/NotoSansSC-Bold.otf",
+                "/system/fonts/NotoSansCJK-Bold.ttc",
+            ]
+            for f in android_bold_fonts:
+                if os.path.exists(f):
+                    font_bold = f
+                    break
+            if not font_bold:
+                font_bold = font_regular
+        
+        if font_regular and os.path.exists(font_regular):
+            for name in ["Roboto", "RobotoLight", "RobotoMedium", "Default"]:
+                LabelBase.register(name=name, fn_regular=font_regular, fn_bold=font_bold or font_regular)
+            Window.font_name = "Roboto"
 
     def on_start(self):
         self.today_str = datetime.date.today().isoformat()
@@ -1099,24 +1122,68 @@ class FitTrackerApp(MDApp):
                 container.add_widget(swipe_card)
 
     def _take_photo(self):
+        import platform
+        system = platform.system()
+        
+        if system == "Linux":
+            # Android - 使用Kivy内置的文件选择器让用户选择图片
+            self._pick_image_android()
+        else:
+            # Windows - 尝试使用plyer
+            self._take_photo_plyer()
+
+    def _pick_image_android(self):
+        """Android上使用文件选择器选择图片"""
+        from kivy.uix.filechooser import FileChooserIconView
+        from kivy.uix.popup import Popup
+        
+        content = BoxLayout(orientation='vertical')
+        
+        filechooser = FileChooserIconView(
+            path='/storage/emulated/0/DCIM',
+            filters=['*.png', '*.jpg', '*.jpeg'],
+            size_hint_y=0.8,
+        )
+        content.add_widget(filechooser)
+        
+        btn_layout = BoxLayout(size_hint_y=0.2, spacing=dp(10), padding=dp(10))
+        cancel_btn = MDFlatButton(text='取消', size_hint_x=0.5)
+        select_btn = MDFlatButton(text='选择', size_hint_x=0.5, 
+                                  theme_text_color="Custom",
+                                  text_color=self._rgba("#4CAF50"))
+        btn_layout.add_widget(cancel_btn)
+        btn_layout.add_widget(select_btn)
+        content.add_widget(btn_layout)
+        
+        popup = Popup(title='选择食物图片', content=content, 
+                      size_hint=(0.9, 0.9), auto_dismiss=False)
+        
+        def select_image(*args):
+            if filechooser.selection:
+                image_path = filechooser.selection[0]
+                popup.dismiss()
+                self._show_recognition_result(image_path)
+        
+        cancel_btn.bind(on_release=lambda *_: popup.dismiss())
+        select_btn.bind(on_release=select_image)
+        popup.open()
+
+    def _take_photo_plyer(self):
+        """Windows上使用plyer拍照"""
         import tempfile
         import os
 
         def on_success(filepath):
-            # 拍照成功，调用AI识别
             self._show_recognition_result(filepath)
 
         def on_error(e):
             print(f"Camera error: {e}")
-            # 降级到手动添加
             self.show_add_food_dialog()
 
         try:
-            # 使用plyer调用系统相机
             temp_dir = tempfile.gettempdir()
             photo_path = os.path.join(temp_dir, "fittracker_photo.jpg")
 
-            # 尝试使用plyer camera
             from plyer import camera
             camera.take_picture(
                 filename=photo_path,
@@ -1124,7 +1191,6 @@ class FitTrackerApp(MDApp):
             )
         except Exception as e:
             print(f"Camera not available: {e}")
-            # 降级：直接打开手动添加
             self.show_add_food_dialog()
 
     def _show_recognition_result(self, image_path):
