@@ -345,9 +345,17 @@ class CalendarWidget(BoxLayout):
             spacing=dp(2),
         )
 
+        from kivy.uix.button import Button
+
         # Empty cells before first day
         for _ in range(first_day):
-            days_grid.add_widget(Widget())
+            empty = Button(
+                size_hint=(1, 1),
+                background_normal='',
+                background_color=(0, 0, 0, 0),
+                disabled=True,
+            )
+            days_grid.add_widget(empty)
 
         # Day cells
         today_str = datetime.date.today().isoformat()
@@ -356,20 +364,21 @@ class CalendarWidget(BoxLayout):
             is_today = date_str == today_str
             is_selected = date_str == self.selected_date
 
-            btn = MDFlatButton(
+            btn = Button(
                 text=str(day),
                 size_hint=(1, 1),
                 on_release=lambda x, d=date_str: self.select_date(d),
             )
-
+            btn.background_normal = ''
             if is_today:
-                btn.md_bg_color = self._rgba("#4CAF50")
-                btn.theme_text_color = "Custom"
-                btn.text_color = (1, 1, 1, 1)
+                btn.background_color = self._rgba("#4CAF50")
+                btn.color = (1, 1, 1, 1)
             elif is_selected:
-                btn.md_bg_color = self._rgba("#FF9800")
-                btn.theme_text_color = "Custom"
-                btn.text_color = (1, 1, 1, 1)
+                btn.background_color = self._rgba("#FF9800")
+                btn.color = (1, 1, 1, 1)
+            else:
+                btn.background_color = (1, 1, 1, 1)
+                btn.color = self._rgba("#212121")
 
             days_grid.add_widget(btn)
 
@@ -423,7 +432,20 @@ class FitTrackerApp(MDApp):
         self.theme_cls.theme_style = "Light"
         # 拦截 Android 返回键
         Window.bind(on_keyboard=self._on_keyboard)
+        # 绑定 Android Activity 结果回调（相机拍照）
+        self._bind_activity_result()
         return Builder.load_string(KV)
+
+    def _bind_activity_result(self):
+        """绑定 Android Activity 结果回调"""
+        if not self._is_android():
+            return
+        try:
+            from android import activity
+            activity.bind(on_activity_result=self._on_activity_result)
+            print("[Camera] Activity result bound")
+        except Exception as e:
+            print(f"[Camera] Cannot bind activity result: {e}")
 
     def _register_cjk_fonts(self):
         import platform
@@ -1255,44 +1277,128 @@ class FitTrackerApp(MDApp):
             self._start_camera()
 
     def _start_camera(self):
-        """打开系统相机拍照"""
-        import datetime
-        from plyer import camera
-
-        # 照片保存目录（公共 Pictures 目录，相机 APP 需要有写入权限）
-        photo_dir = "/storage/emulated/0/Pictures/FitTracker"
-        try:
-            os.makedirs(photo_dir, exist_ok=True)
-        except Exception:
-            # 降级到应用私有目录
-            photo_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "photos"
-            )
-            os.makedirs(photo_dir, exist_ok=True)
-
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(photo_dir, f"food_{timestamp}.jpg")
-
-        try:
-            print(f"[Camera] Opening camera, save to: {filename}")
-            self._camera_file = filename  # 防止 GC
-            camera.take_picture(filename, self._on_camera_complete)
-        except Exception as e:
-            print(f"[Camera] Failed to open camera: {e}")
-            self._show_error_popup("无法打开相机，请确保已授予相机权限")
-
-    def _on_camera_complete(self, image_path):
-        """相机拍照结束回调"""
+        """打开系统相机拍照 - Android Intent + MediaStore URI"""
         from kivy.clock import Clock
-        print(f"[Camera] Callback with: {image_path}")
-        if image_path and os.path.exists(str(image_path)):
+        import datetime
+
+        try:
+            from jnius import autoclass
+
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            Intent = autoclass('android.content.Intent')
+            MediaStore = autoclass('android.provider.MediaStore')
+            ContentValues = autoclass('android.content.ContentValues')
+            Build = autoclass('android.os.Build')
+            Uri = autoclass('android.net.Uri')
+
+            mActivity = PythonActivity.mActivity
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"food_{timestamp}.jpg"
+
+            if Build.VERSION.SDK_INT >= 29:
+                # Android 10+: MediaStore content:// URI（无需 FileProvider）
+                values = ContentValues()
+                values.put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                values.put(MediaStore.Images.Media.MIME_TYPE, 'image/jpeg')
+                values.put(MediaStore.Images.Media.RELATIVE_PATH,
+                           'Pictures/FitTracker')
+                resolver = mActivity.getContentResolver()
+                uri = resolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            else:
+                # Android < 10: file:// URI 直写
+                photo_dir = "/storage/emulated/0/Pictures/FitTracker"
+                os.makedirs(photo_dir, exist_ok=True)
+                File_class = autoclass('java.io.File')
+                photo_file = File_class(photo_dir, filename)
+                uri = Uri.fromFile(photo_file)
+
+            self._camera_uri = uri  # 保存 URI，on_activity_result 中用其读取
+
+            intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+            print(f"[Camera] Launching intent with URI: {uri}")
+            mActivity.startActivityForResult(intent, 999)
+
+        except Exception as e:
+            print(f"[Camera] Failed to start: {e}")
             Clock.schedule_once(
-                lambda dt: self._show_recognition_result(str(image_path)), 0
-            )
-        else:
+                lambda dt: self._show_error_popup("无法启动相机"), 0)
+
+    def _on_activity_result(self, request_code, result_code, ignored_intent):
+        """Android Activity 结果回调：从 camera content:// URI 读取照片"""
+        from kivy.clock import Clock
+
+        if request_code != 999:
+            return
+        if result_code != -1:  # RESULT_OK
+            print("[Camera] User cancelled")
             Clock.schedule_once(
-                lambda dt: self._show_error_popup("拍照取消或失败，请重试"), 0
-            )
+                lambda dt: self._show_error_popup("拍照取消或失败"), 0)
+            return
+
+        uri = getattr(self, '_camera_uri', None)
+        if not uri:
+            Clock.schedule_once(
+                lambda dt: self._show_error_popup("无法读取照片"), 0)
+            return
+
+        try:
+            from jnius import autoclass
+            import datetime
+
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            mActivity = PythonActivity.mActivity
+            resolver = mActivity.getContentResolver()
+
+            # 通过 ContentResolver 读取 content:// URI 的数据
+            input_stream = resolver.openInputStream(uri)
+
+            # 缓冲读取: Java ByteArrayOutputStream
+            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+            baos = ByteArrayOutputStream()
+
+            buf = autoclass('[B').newInstance(4096)  # Java byte[4096]
+            bytes_read = input_stream.read(buf)
+            while bytes_read > 0:
+                baos.write(buf, 0, bytes_read)
+                bytes_read = input_stream.read(buf)
+
+            all_bytes = baos.toByteArray()
+            input_stream.close()
+            baos.close()
+
+            # 写入应用私有目录（保证可读可写）
+            photo_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "photos")
+            os.makedirs(photo_dir, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(photo_dir, f"food_{ts}.jpg")
+
+            File_class = autoclass('java.io.File')
+            FileOutputStream = autoclass('java.io.FileOutputStream')
+            out = FileOutputStream(File_class(filepath))
+            out.write(all_bytes)
+            out.flush()
+            out.close()
+
+            print(f"[Camera] Saved {len(all_bytes)} bytes → {filepath}")
+
+            if os.path.exists(filepath):
+                Clock.schedule_once(
+                    lambda dt, fp=filepath: self._show_recognition_result(fp),
+                    0)
+                return
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[Camera] Error reading photo: {e}")
+
+        Clock.schedule_once(
+            lambda dt: self._show_error_popup("处理照片失败，请重试"), 0)
 
     def _show_error_popup(self, message):
         """通用错误提示弹窗"""
