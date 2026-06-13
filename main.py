@@ -436,21 +436,25 @@ class FitTrackerApp(MDApp):
                 font_regular = "C:/Windows/Fonts/simhei.ttf"
                 font_bold = font_regular
         elif system == "Linux":
-            # Android字体路径
+            # Android字体路径 - 尝试所有可能的路径
             android_fonts = [
                 "/system/fonts/NotoSansSC-Regular.otf",
                 "/system/fonts/NotoSansCJK-Regular.ttc",
                 "/system/fonts/DroidSansFallback.ttf",
-                "/system/fonts/NotoSansSC-Bold.otf",
+                "/system/fonts/NotoSansSC-Regular.ttf",
+                "/system/fonts/Roboto-Regular.ttf",  # Android默认字体
+                "/system/fonts/DroidSans.ttf",
             ]
             for f in android_fonts:
                 if os.path.exists(f):
                     font_regular = f
                     break
+            
             # Bold字体
             android_bold_fonts = [
                 "/system/fonts/NotoSansSC-Bold.otf",
                 "/system/fonts/NotoSansCJK-Bold.ttc",
+                "/system/fonts/DroidSans-Bold.ttf",
             ]
             for f in android_bold_fonts:
                 if os.path.exists(f):
@@ -460,9 +464,12 @@ class FitTrackerApp(MDApp):
                 font_bold = font_regular
         
         if font_regular and os.path.exists(font_regular):
+            print(f"Registering font: {font_regular}")
             for name in ["Roboto", "RobotoLight", "RobotoMedium", "Default"]:
                 LabelBase.register(name=name, fn_regular=font_regular, fn_bold=font_bold or font_regular)
-            Window.font_name = "Roboto"
+        else:
+            print("Warning: No CJK font found, Chinese may not display correctly")
+
 
     def on_start(self):
         self.today_str = datetime.date.today().isoformat()
