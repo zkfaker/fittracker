@@ -24,7 +24,8 @@ def get_access_token():
 def recognize_food(image_path):
     """
     识别食物并返回热量信息
-    返回: {"name": "食物名", "calories": 热量, "confidence": 置信度}
+    返回: [{"name": "食物名", "calories": 热量, "confidence": 置信度}, ...]
+    返回列表按置信度从高到低排序，至少包含一个结果
     """
     access_token = get_access_token()
     if not access_token:
@@ -44,7 +45,7 @@ def recognize_food(image_path):
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
     data = urllib.parse.urlencode({
         'image': image_data,
-        'top_num': 1,
+        'top_num': 3,
         'baike_num': 0,
     }).encode('utf-8')
 
@@ -53,26 +54,31 @@ def recognize_food(image_path):
         with urllib.request.urlopen(req) as response:
             result = json.loads(response.read().decode('utf-8'))
 
+        dishes = []
         if 'result' in result and result['result']:
-            dish = result['result'][0]
-            name = dish.get('name', '未知食物')
-            calorie_str = dish.get('calorie', '0')
+            for dish in result['result']:
+                name = dish.get('name', '未知食物')
+                calorie_str = dish.get('calorie', '0')
 
-            # 解析热量（可能是字符串如"150千卡/100g"）
-            try:
-                calories = float(''.join(filter(str.isdigit, str(calorie_str).split('千')[0])))
-            except:
-                calories = 0
+                # 解析热量（可能是字符串如"150千卡/100g"）
+                try:
+                    calories = float(''.join(filter(str.isdigit, str(calorie_str).split('千')[0])))
+                except:
+                    calories = 0
 
-            return {
-                "name": name,
-                "calories": calories,
-                "confidence": dish.get('probability', 0),
-            }
+                dishes.append({
+                    "name": name,
+                    "calories": calories,
+                    "confidence": float(dish.get('probability', 0)),
+                })
+
+            # 按置信度从高到低排序
+            dishes.sort(key=lambda d: d['confidence'], reverse=True)
+            return dishes
     except Exception as e:
         print(f"识别失败: {e}")
 
-    return None
+    return None  # API 调用失败返回 None，上层会降级到本地数据库查询
 
 
 def get_food_calories(food_name):

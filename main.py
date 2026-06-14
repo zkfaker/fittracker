@@ -1237,11 +1237,10 @@ class FitTrackerApp(MDApp):
                 container.add_widget(swipe_card)
 
     def _take_photo(self):
-        """拍照识别食物 - 直接打开系统相机"""
+        """拍照识别食物"""
         if self._is_android():
             self._request_camera()
         else:
-            # 桌面环境用文件选择器调试
             self._open_file_chooser()
 
     def _is_android(self):
@@ -1252,7 +1251,6 @@ class FitTrackerApp(MDApp):
         except ImportError:
             try:
                 import jnius  # noqa: F401
-                # 如果有 jnius 且系统是 Linux，也可能是 Android
                 import platform
                 return platform.system() == "Linux"
             except ImportError:
@@ -1270,107 +1268,69 @@ class FitTrackerApp(MDApp):
                     if results and all(results):
                         self._start_camera()
                     else:
-                        self._show_error_popup("需要「相机」权限才能拍照识别食物\n请在系统设置中开启相机权限")
+                        self._show_error_popup(
+                            "需要「相机」权限才能拍照识别食物\n"
+                            "请在系统设置中开启相机权限")
                 request_permissions([Permission.CAMERA], on_permissions)
         except ImportError:
-            # 非 Android 或有异常时直接尝试
             self._start_camera()
 
     def _start_camera(self):
-        """打开系统相机拍照 - Android Intent + MediaStore URI"""
+        """打开系统相机拍照 - 缩略图模式（无需 FileProvider，兼容所有 Android）"""
         from kivy.clock import Clock
-        import datetime
 
         try:
             from jnius import autoclass
+            from android.runnable import run_on_ui_thread
 
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             Intent = autoclass('android.content.Intent')
             MediaStore = autoclass('android.provider.MediaStore')
-            ContentValues = autoclass('android.content.ContentValues')
-            Build = autoclass('android.os.Build')
-            Uri = autoclass('android.net.Uri')
 
             mActivity = PythonActivity.mActivity
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"food_{timestamp}.jpg"
-
-            if Build.VERSION.SDK_INT >= 29:
-                # Android 10+: MediaStore content:// URI（无需 FileProvider）
-                values = ContentValues()
-                values.put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-                values.put(MediaStore.Images.Media.MIME_TYPE, 'image/jpeg')
-                values.put(MediaStore.Images.Media.RELATIVE_PATH,
-                           'Pictures/FitTracker')
-                resolver = mActivity.getContentResolver()
-                uri = resolver.insert(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            else:
-                # Android < 10: file:// URI 直写
-                photo_dir = "/storage/emulated/0/Pictures/FitTracker"
-                os.makedirs(photo_dir, exist_ok=True)
-                File_class = autoclass('java.io.File')
-                photo_file = File_class(photo_dir, filename)
-                uri = Uri.fromFile(photo_file)
-
-            self._camera_uri = uri  # 保存 URI，on_activity_result 中用其读取
-
             intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-            intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
-            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            # 不设 EXTRA_OUTPUT → 相机返回缩略图 Bitmap
+            # 此方式兼容所有 Android 版本，回避 FileProvider / MediaStore 问题
 
-            print(f"[Camera] Launching intent with URI: {uri}")
-            mActivity.startActivityForResult(intent, 999)
+            @run_on_ui_thread
+            def launch():
+                mActivity.startActivityForResult(intent, 999)
+
+            self._camera_request_code = 999
+            launch()
+            print("[Camera] Intent launched (thumbnail mode)")
 
         except Exception as e:
             print(f"[Camera] Failed to start: {e}")
-            Clock.schedule_once(
-                lambda dt: self._show_error_popup("无法启动相机"), 0)
+            Clock.schedule_once(lambda dt: self._fallback_to_file_chooser(
+                "无法启动相机，已切换到相册选择"), 0)
 
-    def _on_activity_result(self, request_code, result_code, ignored_intent):
-        """Android Activity 结果回调：从 camera content:// URI 读取照片"""
+    def _on_activity_result(self, request_code, result_code, intent):
+        """Android Activity 结果回调：从相机缩略图 Bitmap 读取照片"""
         from kivy.clock import Clock
 
         if request_code != 999:
             return
         if result_code != -1:  # RESULT_OK
-            print("[Camera] User cancelled")
+            print("[Camera] User cancelled → fallback to file chooser")
             Clock.schedule_once(
-                lambda dt: self._show_error_popup("拍照取消或失败"), 0)
-            return
-
-        uri = getattr(self, '_camera_uri', None)
-        if not uri:
-            Clock.schedule_once(
-                lambda dt: self._show_error_popup("无法读取照片"), 0)
+                lambda dt: self._fallback_to_file_chooser("拍照取消，已切换到相册选择"), 0)
             return
 
         try:
-            from jnius import autoclass
+            from jnius import autoclass, cast
             import datetime
+            import os
 
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            mActivity = PythonActivity.mActivity
-            resolver = mActivity.getContentResolver()
+            extras = intent.getExtras()
+            data = extras.get('data')
+            if not data:
+                raise Exception("No bitmap data in intent")
 
-            # 通过 ContentResolver 读取 content:// URI 的数据
-            input_stream = resolver.openInputStream(uri)
+            Bitmap = autoclass('android.graphics.Bitmap')
+            bitmap = cast(Bitmap, data)
 
-            # 缓冲读取: Java ByteArrayOutputStream
-            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
-            baos = ByteArrayOutputStream()
-
-            buf = autoclass('[B').newInstance(4096)  # Java byte[4096]
-            bytes_read = input_stream.read(buf)
-            while bytes_read > 0:
-                baos.write(buf, 0, bytes_read)
-                bytes_read = input_stream.read(buf)
-
-            all_bytes = baos.toByteArray()
-            input_stream.close()
-            baos.close()
-
-            # 写入应用私有目录（保证可读可写）
+            # 保存到私有 photos 目录
             photo_dir = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "photos")
             os.makedirs(photo_dir, exist_ok=True)
@@ -1380,25 +1340,58 @@ class FitTrackerApp(MDApp):
             File_class = autoclass('java.io.File')
             FileOutputStream = autoclass('java.io.FileOutputStream')
             out = FileOutputStream(File_class(filepath))
-            out.write(all_bytes)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
             out.flush()
             out.close()
 
-            print(f"[Camera] Saved {len(all_bytes)} bytes → {filepath}")
-
+            print(f"[Camera] Thumbnail saved: {filepath}")
             if os.path.exists(filepath):
                 Clock.schedule_once(
-                    lambda dt, fp=filepath: self._show_recognition_result(fp),
-                    0)
+                    lambda dt, fp=filepath: self._show_recognition_result(fp), 0)
                 return
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            print(f"[Camera] Error reading photo: {e}")
+            print(f"[Camera] Error: {e}")
 
         Clock.schedule_once(
-            lambda dt: self._show_error_popup("处理照片失败，请重试"), 0)
+            lambda dt: self._fallback_to_file_chooser("处理照片失败，已切换到相册选择"), 0)
+
+    def _fallback_to_file_chooser(self, message=""):
+        """相机失败时回退到文件选择，先弹提示再打开"""
+        if message:
+            self._show_then_open_chooser(message)
+        else:
+            self._open_file_chooser()
+
+    def _show_then_open_chooser(self, message):
+        """显示提示后打开文件选择器"""
+        from kivy.uix.popup import Popup
+        content = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=[dp(20), dp(12), dp(20), dp(12)],
+        )
+        content.add_widget(MDLabel(
+            text=message,
+            font_style="Subtitle1",
+            size_hint_y=None,
+            height=dp(40),
+        ))
+        btn_layout = BoxLayout(size_hint_y=None, height=dp(44))
+        ok_btn = MDFlatButton(text="好的", size_hint_x=0.5)
+        btn_layout.add_widget(ok_btn)
+        content.add_widget(btn_layout)
+        popup = Popup(
+            title="提示",
+            content=content,
+            size_hint=(0.8, None),
+            height=dp(160),
+            auto_dismiss=False,
+        )
+        ok_btn.bind(on_release=lambda *_: (popup.dismiss(), self._open_file_chooser()))
+        popup.open()
 
     def _show_error_popup(self, message):
         """通用错误提示弹窗"""
@@ -1429,49 +1422,78 @@ class FitTrackerApp(MDApp):
         popup.open()
 
     def _open_file_chooser(self):
-        """（桌面调试用）从文件选择图片"""
+        """从文件选择图片（桌面/Android 均可使用）"""
         from kivy.uix.filechooser import FileChooserIconView
         from kivy.uix.popup import Popup
         import platform
 
         system = platform.system()
         if system == "Windows":
-            initial_path = "C:/Users"
+            # 从用户图片目录开始，方便直接找到图片
+            initial_path = os.path.expanduser("~\\Pictures")
+            if not os.path.isdir(initial_path):
+                initial_path = os.path.expanduser("~")
+        elif system == "Linux" and self._is_android():
+            # Android：从 DCIM 开始，分不同路径尝试
+            for p in ["/storage/emulated/0/DCIM/Camera",
+                      "/storage/emulated/0/DCIM",
+                      "/storage/emulated/0/Pictures",
+                      "/storage/emulated/0/Download"]:
+                if os.path.isdir(p):
+                    initial_path = p
+                    break
+            else:
+                initial_path = "/storage/emulated/0"
         else:
-            initial_path = "/storage/emulated/0"
-            if os.path.exists("/storage/emulated/0/DCIM"):
-                initial_path = "/storage/emulated/0/DCIM"
+            initial_path = os.path.expanduser("~")
 
         content = BoxLayout(orientation='vertical')
 
         filechooser = FileChooserIconView(
             path=initial_path,
-            filters=['*.png', '*.jpg', '*.jpeg'],
+            filters=['*.png', '*.jpg', '*.jpeg', '*.PNG', '*.JPG', '*.JPEG'],
             size_hint_y=0.85,
         )
+
+        # 选中文件时预览图片路径
+        filechooser.bind(selection=lambda fs, sel: None)
         content.add_widget(filechooser)
 
-        btn_layout = BoxLayout(size_hint_y=0.15, spacing=dp(10), padding=dp(10))
+        btn_layout = BoxLayout(
+            size_hint_y=None,
+            height=dp(48),
+            spacing=dp(10),
+            padding=[dp(10), dp(6)],
+        )
         cancel_btn = MDFlatButton(text='取消', size_hint_x=0.5)
-        select_btn = MDFlatButton(text='识别', size_hint_x=0.5,
-                                  md_bg_color=self._rgba("#4CAF50"),
-                                  theme_text_color="Custom",
-                                  text_color=(1, 1, 1, 1))
+        select_btn = MDRaisedButton(
+            text='识别此图片',
+            md_bg_color=self._rgba("#4CAF50"),
+            theme_text_color="Custom",
+            text_color=(1, 1, 1, 1),
+            size_hint_x=0.5,
+        )
         btn_layout.add_widget(cancel_btn)
         btn_layout.add_widget(select_btn)
         content.add_widget(btn_layout)
 
-        popup = Popup(title='选择食物图片', content=content,
-                      size_hint=(0.95, 0.9), auto_dismiss=False)
+        popup = Popup(
+            title='选择食物图片',
+            content=content,
+            size_hint=(0.95, 0.92),
+            auto_dismiss=False,
+        )
 
-        def select_image(*args):
-            if filechooser.selection:
-                image_path = filechooser.selection[0]
+        def do_select(*_args):
+            sel = filechooser.selection
+            if sel:
                 popup.dismiss()
-                self._show_recognition_result(image_path)
+                self._show_recognition_result(sel[0])
 
         cancel_btn.bind(on_release=lambda *_: popup.dismiss())
-        select_btn.bind(on_release=select_image)
+        select_btn.bind(on_release=do_select)
+        # 双击文件也触发表征
+        filechooser.bind(on_submit=lambda fs, sel, *a: do_select())
         popup.open()
 
     def _show_recognition_result(self, image_path):
@@ -1504,170 +1526,234 @@ class FitTrackerApp(MDApp):
         def recognize_in_thread():
             try:
                 from food_recognition import recognize_food, get_food_calories
-                result = recognize_food(image_path)
+                results = recognize_food(image_path)  # 返回 list 或 None
 
-                if result and result.get('name'):
-                    food_name = result['name']
-                    calories = result.get('calories', 0)
-                    if calories == 0:
-                        calories = get_food_calories(food_name)
+                candidates = []
+                if results and len(results) > 0:
+                    for r in results:
+                        cals = r.get('calories', 0)
+                        if cals == 0:
+                            cals = get_food_calories(r['name'])
+                        candidates.append({
+                            'name': r['name'],
+                            'calories': cals,
+                            'confidence': r.get('confidence', 0),
+                        })
+
+                if candidates:
+                    primary = candidates[0]
+                    food_name = primary['name']
+                    calories = primary['calories']
                 else:
-                    # 识别失败，降级到本地查询
                     food_name = "未知食物"
                     calories = 100
 
                 # 在主线程更新UI
                 from kivy.clock import Clock
-                Clock.schedule_once(lambda dt: self._update_food_popup(food_name, calories, image_path), 0)
+                Clock.schedule_once(
+                    lambda dt: self._update_food_popup(food_name, calories, image_path, candidates), 0)
 
             except Exception as e:
                 print(f"识别出错: {e}")
+                import traceback
+                traceback.print_exc()
                 from kivy.clock import Clock
-                Clock.schedule_once(lambda dt: self._update_food_popup("未知食物", 100, image_path), 0)
+                Clock.schedule_once(
+                    lambda dt: self._update_food_popup("未知食物", 100, image_path, []), 0)
 
         threading.Thread(target=recognize_in_thread, daemon=True).start()
 
-    def _update_food_popup(self, food_name, calories, image_path):
-        # 关闭加载提示，显示识别结果
+    def _update_food_popup(self, food_name, calories, image_path, candidates=None):
+        """显示识别结果弹窗：多候选选择 + 份量预设 + 继续添加"""
         self.food_popup.dismiss()
 
+        scroll = ScrollView(do_scroll_y=True, bar_width=dp(4))
         content = BoxLayout(
             orientation="vertical",
-            spacing=dp(12),
-            padding=[dp(20), dp(12), dp(20), dp(12)],
+            spacing=dp(8),
+            padding=[dp(16), dp(8), dp(16), dp(8)],
+            size_hint_y=None,
+            height=dp(440),
         )
 
-        content.add_widget(MDLabel(
-            text=f"识别结果: {food_name}",
-            font_style="Subtitle1",
+        # ── 多候选选择按钮 ──
+        self._candidates = candidates or []
+        if len(self._candidates) > 1:
+            content.add_widget(MDLabel(
+                text="选择匹配的菜品:",
+                font_style="Caption",
+                theme_text_color="Custom",
+                text_color=self._rgba(TEXT_SECONDARY),
+                size_hint_y=None,
+                height=dp(18),
+            ))
+            cand_layout = BoxLayout(
+                orientation="horizontal",
+                spacing=dp(6),
+                size_hint_y=None,
+                height=dp(34),
+            )
+            self._candidate_buttons = []
+            for idx, cand in enumerate(self._candidates):
+                pct = int(float(cand['confidence']) * 100)
+                btn = MDFlatButton(
+                    text=f"{cand['name']} {pct}%",
+                    font_size=dp(11),
+                    md_bg_color=self._rgba("#4CAF50") if idx == 0 else self._rgba("#E0E0E0"),
+                    theme_text_color="Custom",
+                    text_color=(1, 1, 1, 1) if idx == 0 else self._rgba(TEXT_PRIMARY),
+                    on_release=lambda x, i=idx: self._select_candidate(i),
+                )
+                self._candidate_buttons.append(btn)
+                cand_layout.add_widget(btn)
+            content.add_widget(cand_layout)
+
+        # ── 识别结果 ──
+        if food_name:
+            content.add_widget(MDLabel(
+                text=f"识别结果: {food_name}",
+                font_style="Subtitle1",
+                theme_text_color="Custom",
+                text_color=self._rgba("#4CAF50"),
+                size_hint_y=None,
+                height=dp(24),
+            ))
+
+        # ── 输入区：食物名 ──
+        self.food_name_input = TextInput(
+            text=food_name, multiline=False,
+            size_hint_y=None, height=dp(36),
+            font_size=dp(14),
+            hint_text="输入食物名称",
+        )
+        content.add_widget(self.food_name_input)
+
+        # ── 热量 + 份量（同一行） ──
+        cal_gram_layout = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(36))
+        self.food_calories_input = TextInput(
+            text=str(int(calories)) if calories else "", multiline=False,
+            input_filter="float",
+            font_size=dp(14),
+            hint_text="千卡/100g",
+        )
+        self.food_grams_input = TextInput(
+            text="100", multiline=False,
+            input_filter="float",
+            font_size=dp(14),
+            hint_text="克",
+        )
+        cal_gram_layout.add_widget(self.food_calories_input)
+        cal_gram_layout.add_widget(MDLabel(
+            text="×", halign="center",
+            size_hint_x=0.1, size_hint_y=None, height=dp(36),
+        ))
+        cal_gram_layout.add_widget(self.food_grams_input)
+        cal_gram_layout.add_widget(MDLabel(
+            text="克", size_hint_x=0.12,
+            font_style="Caption", size_hint_y=None, height=dp(36),
+        ))
+        content.add_widget(cal_gram_layout)
+
+        # ── 份量预设按钮 ──
+        preset_layout = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(30))
+        for label, g in [("小份 100g", 100), ("中份 250g", 250), ("大份 400g", 400)]:
+            btn = MDFlatButton(
+                text=label, font_size=dp(11),
+                md_bg_color=self._rgba("#E8F5E9"),
+                on_release=lambda x, v=g: setattr(self.food_grams_input, 'text', str(v)),
+            )
+            preset_layout.add_widget(btn)
+        content.add_widget(preset_layout)
+
+        # ── 总热量动态显示 ──
+        self.total_cal_label = MDLabel(
+            text="", font_style="Body1", halign="center",
             theme_text_color="Custom",
-            text_color=self._rgba("#4CAF50"),
-            size_hint_y=None,
-            height=dp(30),
-        ))
+            text_color=self._rgba(ACCENT),
+            size_hint_y=None, height=dp(20),
+        )
+        content.add_widget(self.total_cal_label)
 
-        content.add_widget(MDLabel(
-            text=f"预估热量: {int(calories)} 千卡/100g",
-            font_style="Body1",
-            size_hint_y=None,
-            height=dp(25),
-        ))
+        def update_total(*_):
+            try:
+                c = float(self.food_calories_input.text or 0)
+                g = float(self.food_grams_input.text or 0)
+                total = c * g / 100
+                self.total_cal_label.text = f"总热量: {total:.0f} 千卡"
+            except ValueError:
+                self.total_cal_label.text = ""
+        self.food_calories_input.bind(text=update_total)
+        self.food_grams_input.bind(text=update_total)
+        update_total()
 
-        # 餐次选择
+        # ── 餐次选择 ──
         meal_types = ["早餐", "午餐", "晚餐", "加餐"]
-        meal_type_layout = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(40))
+        meal_type_layout = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(36))
         self.meal_type_buttons = []
         for mt in meal_types:
             btn = MDFlatButton(
-                text=mt,
-                size_hint_x=0.25,
+                text=mt, size_hint_x=0.25,
                 on_release=lambda x, t=mt: self._select_meal_type(t),
             )
             self.meal_type_buttons.append(btn)
             meal_type_layout.add_widget(btn)
         content.add_widget(meal_type_layout)
 
-        self.food_name_input = TextInput(
-            text=food_name,
-            multiline=False,
-            size_hint_y=None,
-            height=dp(44),
-            font_size=dp(16),
+        # ── 按钮：取消 / 继续添加 / 添加 ──
+        btn_layout = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        cancel_btn = MDFlatButton(text="取消", size_hint_x=0.3)
+        continue_btn = MDFlatButton(
+            text="继续添加", size_hint_x=0.35,
+            theme_text_color="Custom",
+            text_color=self._rgba(ACCENT),
         )
-        content.add_widget(self.food_name_input)
-
-        self.food_calories_input = TextInput(
-            text=str(int(calories)),
-            multiline=False,
-            input_filter="float",
-            size_hint_y=None,
-            height=dp(44),
-            font_size=dp(16),
-        )
-        content.add_widget(self.food_calories_input)
-
-        btn_layout = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(12))
-        cancel_btn = MDFlatButton(text="取消")
         add_btn = MDFlatButton(
-            text="添加",
+            text="添加", size_hint_x=0.35,
             theme_text_color="Custom",
             text_color=self._rgba("#4CAF50"),
         )
         btn_layout.add_widget(cancel_btn)
+        btn_layout.add_widget(continue_btn)
         btn_layout.add_widget(add_btn)
         content.add_widget(btn_layout)
 
+        # 默认选中「午餐」
+        if not hasattr(self, 'selected_meal_type') or not self.selected_meal_type:
+            self._select_meal_type("午餐")
+
+        scroll.add_widget(content)
         self.food_popup = Popup(
             title="添加饮食记录",
-            content=content,
-            size_hint=(0.9, None),
-            height=dp(320),
+            content=scroll,
+            size_hint=(0.92, 0.62),
             auto_dismiss=False,
         )
 
         cancel_btn.bind(on_release=lambda *_: self.food_popup.dismiss())
+        continue_btn.bind(on_release=lambda *_: self._add_food_and_continue(image_path))
         add_btn.bind(on_release=lambda *_: self._add_food())
         self.food_popup.open()
-        content = BoxLayout(
-            orientation="vertical",
-            spacing=dp(12),
-            padding=[dp(20), dp(12), dp(20), dp(12)],
-        )
 
-        meal_types = ["早餐", "午餐", "晚餐", "加餐"]
-        meal_type_layout = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(40))
-        self.meal_type_buttons = []
-        for mt in meal_types:
-            btn = MDFlatButton(
-                text=mt,
-                size_hint_x=0.25,
-                on_release=lambda x, t=mt: self._select_meal_type(t),
-            )
-            self.meal_type_buttons.append(btn)
-            meal_type_layout.add_widget(btn)
-        content.add_widget(meal_type_layout)
+    def _add_food_and_continue(self, image_path):
+        """保存当前食物，然后重新打开弹窗继续从同一张图添加另一道菜"""
+        self._add_food()
+        # 重新打开空弹窗，让用户手动输入下一道菜
+        self._update_food_popup("", 0, image_path, [])
 
-        self.food_name_input = TextInput(
-            hint_text="食物名称",
-            multiline=False,
-            size_hint_y=None,
-            height=dp(44),
-            font_size=dp(16),
-        )
-        content.add_widget(self.food_name_input)
-
-        self.food_calories_input = TextInput(
-            hint_text="热量(千卡)",
-            multiline=False,
-            input_filter="float",
-            size_hint_y=None,
-            height=dp(44),
-            font_size=dp(16),
-        )
-        content.add_widget(self.food_calories_input)
-
-        btn_layout = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(12))
-        cancel_btn = MDFlatButton(text="取消")
-        add_btn = MDFlatButton(
-            text="添加",
-            theme_text_color="Custom",
-            text_color=self._rgba("#4CAF50"),
-        )
-        btn_layout.add_widget(cancel_btn)
-        btn_layout.add_widget(add_btn)
-        content.add_widget(btn_layout)
-
-        self.food_popup = Popup(
-            title="添加饮食记录",
-            content=content,
-            size_hint=(0.9, None),
-            height=dp(300),
-            auto_dismiss=False,
-        )
-
-        cancel_btn.bind(on_release=lambda *_: self.food_popup.dismiss())
-        add_btn.bind(on_release=lambda *_: self._add_food())
-        self.food_popup.open()
+    def _select_candidate(self, index):
+        """切换选中的候选菜品"""
+        cand = self._candidates[index]
+        self.food_name_input.text = cand['name']
+        self.food_calories_input.text = str(int(cand['calories']))
+        for i, btn in enumerate(self._candidate_buttons):
+            if i == index:
+                btn.md_bg_color = self._rgba("#4CAF50")
+                btn.theme_text_color = "Custom"
+                btn.text_color = (1, 1, 1, 1)
+            else:
+                btn.md_bg_color = self._rgba("#E0E0E0")
+                btn.theme_text_color = "Custom"
+                btn.text_color = self._rgba(TEXT_PRIMARY)
 
     def show_add_food_dialog(self):
         content = BoxLayout(
@@ -1746,13 +1832,20 @@ class FitTrackerApp(MDApp):
     def _add_food(self):
         food_name = self.food_name_input.text.strip()
         try:
-            calories = float(self.food_calories_input.text)
+            calories_per_100g = float(self.food_calories_input.text)
         except ValueError:
-            calories = 0
+            calories_per_100g = 0
+        try:
+            grams_input = getattr(self, 'food_grams_input', None)
+            grams = float(grams_input.text) if grams_input else 100
+        except (ValueError, AttributeError):
+            grams = 100
 
-        if food_name and calories > 0:
+        if food_name and calories_per_100g > 0:
+            # 根据份量计算实际总热量
+            total_calories = calories_per_100g * grams / 100
             meal_type = getattr(self, 'selected_meal_type', '午餐')
-            database.add_meal(self.today_str, meal_type, food_name, calories)
+            database.add_meal(self.today_str, meal_type, food_name, total_calories)
             self.food_popup.dismiss()
             self.refresh_food()
 
